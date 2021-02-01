@@ -33,7 +33,6 @@ if getattr(sys, 'frozen', False):
    executable_path = f'{path.dirname(sys.executable)}/'
 else:
    executable_path = ''
-print(executable_path)
 db = TinyDB(f'{executable_path}db.json')
 cameras_table = db.table('cameras')
 cameras = []
