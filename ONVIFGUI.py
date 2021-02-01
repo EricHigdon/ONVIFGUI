@@ -29,7 +29,12 @@ JOYSTICK_ICONS = {
    'downright': '↘'
 }
 
-db = TinyDB('db.json')
+if getattr(sys, 'frozen', False):
+   executable_path = f'{path.dirname(sys.executable)}/'
+else:
+   executable_path = ''
+print(executable_path)
+db = TinyDB(f'{executable_path}db.json')
 cameras_table = db.table('cameras')
 cameras = []
 
@@ -41,7 +46,7 @@ def setup_cameras():
       try:
          camera_kwargs = {}
          if getattr(sys, 'frozen', False):
-            camera_kwargs['wsdl_dir'] = path.dirname(sys.executable) + '/wsdl'
+            camera_kwargs['wsdl_dir'] =  f'{executable_path}wsdl'
          camera_obj = onvif.ONVIFCamera(
             camera['ip'],
             camera['port'],
@@ -159,9 +164,9 @@ class MainWindow(QWidget):
        for preset_number in range(5):
           preset_wrapper = QVBoxLayout()
 
-          image_path = f'images/preset-{camera.camera_number}-{preset_number}.jpg'
+          image_path = f'{executable_path}images/preset-{camera.camera_number}-{preset_number}.jpg'
           if not path.exists(image_path):
-             image_path = 'images/default.jpg'
+             image_path = f'{executable_path}images/default.jpg'
           recall_button = ImageButton(image_path)
           recall_button.clicked.connect(self.get_preset_function(camera, preset_number))
           preset_wrapper.addWidget(recall_button)
@@ -286,7 +291,7 @@ class MainWindow(QWidget):
             })
           client = cv2.VideoCapture(camera.stream['Uri'])
           ret, frame = client.read()
-          image_path = f'images/preset-{camera.camera_number}-{preset_number}.jpg'
+          image_path = f'{executable_path}images/preset-{camera.camera_number}-{preset_number}.jpg'
           cv2.imwrite(image_path, frame)
           client.release()
           button.refresh(image_path)
