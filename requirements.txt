@@ -2,3 +2,4 @@ PyQt5
 onvif_zeep
 tinydb
 opencv-python
+cx_Freeze
