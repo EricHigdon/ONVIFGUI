@@ -39,11 +39,15 @@ def setup_cameras():
    cameras = []
    for camera_number, camera in enumerate(cameras_table.all()):
       try:
+         camera_kwargs = {}
+         if getattr(sys, 'frozen', False):
+            camera_kwargs['wsdl_dir'] = path.dirname(sys.executable) + '/wsdl'
          camera_obj = onvif.ONVIFCamera(
             camera['ip'],
             camera['port'],
             camera['user_name'],
             camera['password'],
+            **camera_kwargs
          )
          camera_obj.name = camera['name']
          camera_obj.camera_number = camera_number
