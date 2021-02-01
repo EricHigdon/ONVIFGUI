@@ -1,0 +1,1 @@
+{"cameras": {"1": {"name": "Left", "ip": "192.168.5.36", "port": "2000", "user_name": "admin", "password": "admin"}, "2": {"name": "Right", "ip": "192.168.5.43", "port": "2000", "user_name": "admin", "password": "admin"}}}
