@@ -1,6 +1,6 @@
 import sys
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QPainter, QPixmap
+from PyQt5.QtCore import QSize, Qt, QRunnable, QThreadPool
+from PyQt5.QtGui import QPainter, QPixmap, QPen, QBrush, QColor
 from PyQt5.QtWidgets import QApplication, QWidget, QDialog, QLabel, \
    QDialogButtonBox, QVBoxLayout, QGroupBox, QFormLayout, QLineEdit, \
    QPushButton, QHBoxLayout, QGridLayout, QSlider, QComboBox
@@ -28,6 +28,11 @@ JOYSTICK_ICONS = {
    'down': '↓',
    'downright': '↘'
 }
+PRESET_STATUSES = {
+    'selected': (255, 255, 0, 255),
+    'active': (0, 255, 0, 255),
+    'waiting': (255, 0, 0, 255)
+}
 
 if getattr(sys, 'frozen', False):
    executable_path = f'{path.dirname(sys.executable)}/'
@@ -36,7 +41,10 @@ else:
 db = TinyDB(f'{executable_path}db.json')
 cameras_table = db.table('cameras')
 cameras = []
+pool = QThreadPool.globalInstance()
+pool.setMaxThreadCount(1)
 midiout = rtmidi.MidiOut()
+preset_buttons = []
 
 
 class BaseDialog(QDialog):
@@ -52,6 +60,34 @@ class BaseDialog(QDialog):
       save_buttons.accepted.connect(self.accept)
       save_buttons.rejected.connect(self.reject)
       return save_buttons
+
+
+class Switcher(QRunnable):
+   def __init__(self, camera, button):
+      self.camera = camera
+      self.button = button
+      super().__init__()
+
+   def run(self):
+      self.button.set_status('selected')
+      request = {'ProfileToken': self.camera.media_profile.token}
+      response = None
+      for i in range(int(self.camera.preset_timeout)):
+         new_response = self.camera.ptz.GetStatus(request)
+         if response is not None:
+            if response['Position']['PanTilt']['x'] == new_response['Position']['PanTilt']['x'] \
+            and response['Position']['PanTilt']['y'] == new_response['Position']['PanTilt']['y'] \
+            and response['Position']['Zoom']['x'] == new_response['Position']['Zoom']['x']:
+               self.transition_to_camera()
+               self.button.set_status('active')
+               break
+         response = new_response
+
+   def transition_to_camera(self):
+      note_on = [0x90, int(self.camera.midi_note), 127]
+      note_off = [0x80, int(self.camera.midi_note), 0]
+      midiout.send_message(note_on)
+      midiout.send_message(note_off)
 
 
 def open_midi_dialog():
@@ -201,8 +237,8 @@ class CameraDialog(BaseDialog):
       layout.addRow(QLabel('Port:'), QLineEdit(text=str(port)))
       layout.addRow(QLabel("User Name:"), QLineEdit(text=user_name))
       layout.addRow(QLabel("Password:"), QLineEdit(text=password))
-      layout.addRow(QLabel("Preset Timeout:"), QLineEdit(text=preset_timeout))
-      layout.addRow(QLabel("Switcher Midi Note:"), QLineEdit(text=midi_note))
+      layout.addRow(QLabel("Preset Timeout:"), QLineEdit(text=str(preset_timeout)))
+      layout.addRow(QLabel("Switcher Midi Note:"), QLineEdit(text=str(midi_note)))
 
       if camera_number > 1:
          remove_button = QPushButton('Remove')
@@ -255,6 +291,7 @@ class CameraDialog(BaseDialog):
 
 
 class ImageButton(QPushButton):
+   status = ''
    def __init__(self, path, parent=None, width=None):
       super().__init__(parent)
       self.path = path
@@ -264,6 +301,11 @@ class ImageButton(QPushButton):
    def paintEvent(self, event):
       painter = QPainter(self)
       painter.drawPixmap(event.rect(), self.pixmap)
+      if self.status:
+        color = PRESET_STATUSES.get(self.status)
+        lineColor = QColor(*color)
+        painter.setPen(QPen(lineColor, 10))
+        painter.drawRect(event.rect())
 
    def heightForWidth(self, w):
       return int(w / 1.78)
@@ -275,8 +317,21 @@ class ImageButton(QPushButton):
       return QSize(275, 154)
 
    def refresh(self, path=None):
-      self.pixmap = QPixmap(path)
+      if path:
+        self.pixmap = QPixmap(path)
       self.repaint()
+
+   def set_status(self, status, reset_other_buttons=True):
+      if reset_other_buttons and status != 'waiting':
+        for row in preset_buttons:
+          for button in row:
+            if button.status and self in row:
+              button.set_status('', reset_other_buttons=False)
+            elif status == 'active' and button.status and self not in row:
+              button.set_status('selected', reset_other_buttons=False)
+
+      self.status = status
+      self.update()
 
 
 class MainWindow(QWidget):
@@ -313,14 +368,15 @@ class MainWindow(QWidget):
 
     def add_camera_row(self, camera):
        row = QHBoxLayout()
+       button_row = []
        for preset_number in range(5):
           preset_wrapper = QVBoxLayout()
-
           image_path = f'{executable_path}images/preset-{camera.camera_number}-{preset_number}.jpg'
           if not path.exists(image_path):
              image_path = f'{executable_path}images/default.jpg'
           recall_button = ImageButton(image_path)
-          recall_button.clicked.connect(self.get_preset_function(camera, preset_number))
+          recall_button.clicked.connect(self.get_preset_function(camera, preset_number, recall_button))
+          button_row.append(recall_button)
           preset_wrapper.addWidget(recall_button)
 
           set_button = QPushButton('Update Preset')
@@ -329,6 +385,7 @@ class MainWindow(QWidget):
 
           row.addLayout(preset_wrapper)
        row.addLayout(self.create_joystick_layout(camera))
+       preset_buttons.append(button_row)
 
        self.main_layout.addLayout(row)
 
@@ -404,9 +461,10 @@ class MainWindow(QWidget):
           camera.imaging.Move(request)
        return focus
 
-    def get_preset_function(self, camera, preset_number):
+    def get_preset_function(self, camera, preset_number, button):
        def trigger_preset():
           try:
+            button.set_status('waiting')
             speed = camera.speed_slider.value() / 100
             speed = {
                'PanTilt': {
@@ -420,17 +478,8 @@ class MainWindow(QWidget):
                'PresetToken': camera.presets[preset_number]['token'],
                'Speed': speed
             })
-            request = {'ProfileToken': camera.media_profile.token}
-            response = None
-            for i in range(int(camera.preset_timeout)):
-               new_response = camera.ptz.GetStatus(request)
-               if response is not None:
-                  if response['Position']['PanTilt']['x'] == new_response['Position']['PanTilt']['x'] \
-                  and response['Position']['PanTilt']['y'] == new_response['Position']['PanTilt']['y'] \
-                  and response['Position']['Zoom']['x'] == new_response['Position']['Zoom']['x']:
-                     self.transition_to_camera(camera)
-                     break
-               response = new_response
+            switcher = Switcher(camera, button)
+            pool.start(switcher)
           except IndexError:
              pass
        return trigger_preset
@@ -459,12 +508,6 @@ class MainWindow(QWidget):
           client.release()
           button.refresh(image_path)
        return set_preset
-
-    def transition_to_camera(self, camera):
-       note_on = [0x90, int(camera.midi_note), 127]
-       note_off = [0x80, int(camera.midi_note), 0]
-       midiout.send_message(note_on)
-       midiout.send_message(note_off)
 
     def closeEvent(self, event):
        global midiout
