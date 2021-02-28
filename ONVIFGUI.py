@@ -1,12 +1,12 @@
 import sys
-
 from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import QApplication, QWidget, QDialog, QLabel, \
    QDialogButtonBox, QVBoxLayout, QGroupBox, QFormLayout, QLineEdit, \
-   QPushButton, QHBoxLayout, QGridLayout, QSlider
+   QPushButton, QHBoxLayout, QGridLayout, QSlider, QComboBox
 import onvif
 from tinydb import TinyDB
+import rtmidi
 from os import path
 
 
@@ -36,6 +36,44 @@ else:
 db = TinyDB(f'{executable_path}db.json')
 cameras_table = db.table('cameras')
 cameras = []
+midiout = rtmidi.MidiOut()
+
+
+class BaseDialog(QDialog):
+   def __init__(self, *args, **kwargs):
+      super().__init__(*args, **kwargs)
+      self.main_layout = QVBoxLayout()
+      self.setLayout(self.main_layout)
+
+   def create_save_buttons(self):
+      save_buttons = QDialogButtonBox(
+         QDialogButtonBox.Save | QDialogButtonBox.Cancel
+      )
+      save_buttons.accepted.connect(self.accept)
+      save_buttons.rejected.connect(self.reject)
+      return save_buttons
+
+
+def open_midi_dialog():
+   dialog = MidiDialog()
+   dialog.exec_()
+
+
+class MidiDialog(BaseDialog):
+   def __init__(self, *args, **kwargs):
+      super().__init__(*args, **kwargs)
+      self.setWindowTitle('Midi Setup')
+      available_ports = midiout.get_ports()
+      self.dropdown = QComboBox()
+      self.dropdown.addItems(available_ports)
+      self.main_layout.addWidget(self.dropdown)
+      self.main_layout.addWidget(self.create_save_buttons())
+
+   def accept(self):
+      port_index = self.dropdown.currentIndex()
+      midiout.close_port()
+      midiout.open_port(port_index)
+      return super().accept()
 
 
 def setup_cameras():
@@ -54,6 +92,11 @@ def setup_cameras():
             **camera_kwargs
          )
          camera_obj.name = camera['name']
+         camera_obj.preset_timeout = camera['preset_timeout']
+         try:
+            camera_obj.midi_note = camera['midi_note']
+         except KeyError:
+            camera_obj.midi_note = '0'
          camera_obj.camera_number = camera_number
          camera_obj.create_media_service()
          camera_obj.media_profile = camera_obj.media.GetProfiles()[0]
@@ -108,10 +151,107 @@ def get_cameras():
    return cameras
 
 
-def setup_cameras_window():
-   window = QWidget()
-   window.setWindowTitle('Set Up Cameras')
-   return window
+def open_camera_dialog():
+   dialog = CameraDialog()
+   dialog.exec_()
+
+
+class CameraDialog(BaseDialog):
+   camera_forms = []
+
+   def __init__(self):
+      super().__init__()
+
+      self.form_layout = QVBoxLayout()
+      camera_list = get_cameras()
+      if len(camera_list):
+         for index, camera in enumerate(camera_list):
+            self.form_layout.addWidget(
+               self.create_camera_form(
+                  camera_number=index + 1, camera=camera
+               )
+            )
+      else:
+         self.form_layout.addWidget(self.create_camera_form())
+      self.main_layout.addLayout(self.form_layout)
+      self.main_layout.addWidget(self.create_add_button())
+      self.main_layout.addWidget(self.create_save_buttons())
+      self.setWindowTitle('Camera Setup')
+
+   def create_camera_form(self, camera_number=1, camera=None):
+      camera_form = QGroupBox(f'Camera {camera_number}')
+      layout = QFormLayout()
+      name = ''
+      ip = '192.168.'
+      port = '2000'
+      user_name = 'admin'
+      password = 'admin'
+      preset_timeout = 1000
+      midi_note = 0
+      if camera:
+         name = camera.name
+         ip = camera.host
+         port = camera.port
+         user_name = camera.user
+         password = camera.passwd
+         preset_timeout = camera.preset_timeout
+         midi_note = camera.midi_note
+      layout.addRow(QLabel('Name:'), QLineEdit(text=name))
+      layout.addRow(QLabel('IP:'), QLineEdit(text=ip))
+      layout.addRow(QLabel('Port:'), QLineEdit(text=str(port)))
+      layout.addRow(QLabel("User Name:"), QLineEdit(text=user_name))
+      layout.addRow(QLabel("Password:"), QLineEdit(text=password))
+      layout.addRow(QLabel("Preset Timeout:"), QLineEdit(text=preset_timeout))
+      layout.addRow(QLabel("Switcher Midi Note:"), QLineEdit(text=midi_note))
+
+      if camera_number > 1:
+         remove_button = QPushButton('Remove')
+         remove_button.clicked.connect(self.get_remove_camera_method(camera_form))
+         layout.addRow(remove_button)
+
+      camera_form.setLayout(layout)
+      self.camera_forms.append(camera_form)
+      return camera_form
+
+   def create_add_button(self):
+      add_button = QPushButton('Add')
+      add_button.clicked.connect(self.add_camera_form)
+      return add_button
+
+   def add_camera_form(self):
+      self.form_layout.addWidget(
+         self.create_camera_form(camera_number=len(self.camera_forms) + 1)
+      )
+
+   def get_remove_camera_method(self, form):
+      dialog = self
+      def remove_camera_form(self):
+         # TODO: Make the form layout shrink when a form is removed
+         dialog.form_layout.removeWidget(form)
+         form.deleteLater()
+         dialog.camera_forms.remove(form)
+         dialog.setLayout(dialog.main_layout)
+      return remove_camera_form
+
+   def accept(self):
+      db.drop_table('cameras')
+      for form in self.camera_forms:
+         try:
+            fields = form.children()
+            camera_data = {
+               'name': fields[2].text(),
+               'ip': fields[4].text(),
+               'port': fields[6].text(),
+               'user_name': fields[8].text(),
+               'password': fields[10].text(),
+               'preset_timeout': fields[12].text(),
+               'midi_note': fields[14].text(),
+            }
+            cameras_table.insert(camera_data)
+         except Exception:
+            pass
+      setup_cameras()
+      return super().accept()
 
 
 class ImageButton(QPushButton):
@@ -140,9 +280,16 @@ class ImageButton(QPushButton):
 
 
 class MainWindow(QWidget):
+
     def __init__(self, *args, **kwargs):
        super().__init__(*args, **kwargs)
        self.setWindowTitle('Camera Controller')
+
+       available_ports = midiout.get_ports()
+       if available_ports:
+           open_midi_dialog()
+       else:
+          midiout.open_virtual_port('Virtual Port')
 
        if not get_cameras():
           open_camera_dialog()
@@ -151,11 +298,17 @@ class MainWindow(QWidget):
 
     def setup_layout(self):
        self.main_layout = QVBoxLayout()
+
        cameras_button = QPushButton('Edit Cameras')
        cameras_button.clicked.connect(open_camera_dialog)
        for camera in get_cameras():
          self.add_camera_row(camera)
        self.main_layout.addWidget(cameras_button)
+
+       midi_button = QPushButton('Midi Settings')
+       midi_button.clicked.connect(open_midi_dialog)
+       self.main_layout.addWidget(midi_button)
+
        self.setLayout(self.main_layout)
 
     def add_camera_row(self, camera):
@@ -267,6 +420,17 @@ class MainWindow(QWidget):
                'PresetToken': camera.presets[preset_number]['token'],
                'Speed': speed
             })
+            request = {'ProfileToken': camera.media_profile.token}
+            response = None
+            for i in range(int(camera.preset_timeout)):
+               new_response = camera.ptz.GetStatus(request)
+               if response is not None:
+                  if response['Position']['PanTilt']['x'] == new_response['Position']['PanTilt']['x'] \
+                  and response['Position']['PanTilt']['y'] == new_response['Position']['PanTilt']['y'] \
+                  and response['Position']['Zoom']['x'] == new_response['Position']['Zoom']['x']:
+                     self.transition_to_camera(camera)
+                     break
+               response = new_response
           except IndexError:
              pass
        return trigger_preset
@@ -296,115 +460,22 @@ class MainWindow(QWidget):
           button.refresh(image_path)
        return set_preset
 
-class CameraDialog(QDialog):
-   camera_forms = []
+    def transition_to_camera(self, camera):
+       note_on = [0x90, int(camera.midi_note), 127]
+       note_off = [0x80, int(camera.midi_note), 0]
+       midiout.send_message(note_on)
+       midiout.send_message(note_off)
 
-   def __init__(self):
-      super().__init__()
+    def closeEvent(self, event):
+       global midiout
+       del midiout
 
-      self.main_layout = QVBoxLayout()
-      self.form_layout = QVBoxLayout()
-      camera_list = get_cameras()
-      if len(camera_list):
-         for index, camera in enumerate(camera_list):
-            self.form_layout.addWidget(
-               self.create_camera_form(
-                  camera_number=index + 1, camera=camera
-               )
-            )
-      else:
-         self.form_layout.addWidget(self.create_camera_form())
-      self.main_layout.addLayout(self.form_layout)
-      self.main_layout.addWidget(self.create_add_button())
-      self.main_layout.addWidget(self.create_save_buttons())
-      self.setLayout(self.main_layout)
-      self.setWindowTitle('Camera Setup')
-
-   def create_camera_form(self, camera_number=1, camera=None):
-      camera_form = QGroupBox(f'Camera {camera_number}')
-      layout = QFormLayout()
-      name = ''
-      ip = '192.168.'
-      port = '2000'
-      user_name = 'admin'
-      password = 'admin'
-      if camera:
-         name = camera.name
-         ip = camera.host
-         port = camera.port
-         user_name = camera.user
-         password = camera.passwd
-      layout.addRow(QLabel('Name:'), QLineEdit(text=name))
-      layout.addRow(QLabel('IP:'), QLineEdit(text=ip))
-      layout.addRow(QLabel('Port:'), QLineEdit(text=str(port)))
-      layout.addRow(QLabel("User Name:"), QLineEdit(text=user_name))
-      layout.addRow(QLabel("Password:"), QLineEdit(text=password))
-
-      if camera_number > 1:
-         remove_button = QPushButton('Remove')
-         remove_button.clicked.connect(self.get_remove_camera_method(camera_form))
-         layout.addRow(remove_button)
-
-      camera_form.setLayout(layout)
-      self.camera_forms.append(camera_form)
-      return camera_form
-
-   def create_save_buttons(self):
-      save_buttons = QDialogButtonBox(
-         QDialogButtonBox.Save | QDialogButtonBox.Cancel
-      )
-      save_buttons.accepted.connect(self.accept)
-      save_buttons.rejected.connect(self.reject)
-      return save_buttons
-
-   def create_add_button(self):
-      add_button = QPushButton('Add')
-      add_button.clicked.connect(self.add_camera_form)
-      return add_button
-
-   def add_camera_form(self):
-      self.form_layout.addWidget(
-         self.create_camera_form(camera_number=len(self.camera_forms) + 1)
-      )
-
-   def get_remove_camera_method(self, form):
-      dialog = self
-      def remove_camera_form(self):
-         # TODO: Make the form layout shrink when a form is removed
-         dialog.form_layout.removeWidget(form)
-         form.deleteLater()
-         dialog.camera_forms.remove(form)
-         dialog.setLayout(dialog.main_layout)
-      return remove_camera_form
-
-   def accept(self):
-      db.drop_table('cameras')
-      for form in self.camera_forms:
-          try:
-            fields = form.children()
-            camera_data = {
-               'name': fields[2].text(),
-               'ip': fields[4].text(),
-               'port': fields[6].text(),
-               'user_name': fields[8].text(),
-               'password': fields[10].text()
-            }
-            cameras_table.insert(camera_data)
-          except Exception:
-             pass
-      setup_cameras()
-      return super().accept()
-
-
-def open_camera_dialog():
-   dialog = CameraDialog()
-   dialog.exec_()
 
 def main():
    app = QApplication(sys.argv)
    window = MainWindow()
    window.show()
    sys.exit(app.exec_())
-	
+
 if __name__ == '__main__':
    main()
