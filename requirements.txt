@@ -3,3 +3,4 @@ onvif_zeep
 tinydb
 opencv-python
 cx_Freeze
+python-rtmidi
