@@ -46,6 +46,8 @@ def setup_cameras():
          camera_kwargs = {}
          if getattr(sys, 'frozen', False):
             camera_kwargs['wsdl_dir'] =  f'{executable_path}wsdl'
+         elif sys.platform == 'win32':
+            camera_kwargs['wsdl_dir'] = 'C:\\Users\\ehigdon\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.9_qbz5n2kfra8p0\\LocalCache\\local-packages\\Lib\\site-packages\\wsdl'
          camera_obj = onvif.ONVIFCamera(
             camera['ip'],
             camera['port'],
